@@ -59,6 +59,8 @@ function loadState() {
 export default class WorkspaceRestoreExtension {
     #restoreTimerId = null;
     #saveTimerId = null;
+    #focusSignalId = null;
+    #lastFocusedId = null;
 
     async enable() {
         const state = loadState();
@@ -67,6 +69,14 @@ export default class WorkspaceRestoreExtension {
         this.#saveTimerId = GLib.timeout_add_seconds(GLib.PRIORITY_LOW, 10, () => {
             saveState();
             return GLib.SOURCE_CONTINUE;
+        });
+
+        // Track focus in real-time so disable() always writes the current focused window,
+        // even if it changed within the 10s periodic save window before locking
+        this.#lastFocusedId = global.display.focus_window?.get_id() ?? null;
+        this.#focusSignalId = global.display.connect('notify::focus-window', () => {
+            const id = global.display.focus_window?.get_id();
+            if (id != null) this.#lastFocusedId = id;
         });
 
         if (!state) return;
@@ -125,7 +135,6 @@ export default class WorkspaceRestoreExtension {
                 else if (!saved.minimized && win.minimized) win.unminimize();
             }
 
-            // Restore focus to the window that was on top before locking
             const focusedWin = state.focusedId ? winMap.get(state.focusedId) : null;
             if (focusedWin && !focusedWin.minimized)
                 focusedWin.focus(global.get_current_time());
@@ -136,6 +145,24 @@ export default class WorkspaceRestoreExtension {
     }
 
     disable() {
+        if (this.#focusSignalId !== null) {
+            global.display.disconnect(this.#focusSignalId);
+            this.#focusSignalId = null;
+        }
+
+        // Update focusedId with the real-time tracked value without touching geometry,
+        // which GNOME may have already altered by the time disable() fires
+        if (this.#lastFocusedId !== null) {
+            try {
+                const file = Gio.File.new_for_path(STATE_FILE);
+                const [, contents] = file.load_contents(null);
+                const saved = JSON.parse(new TextDecoder().decode(contents));
+                saved.focusedId = this.#lastFocusedId;
+                file.replace_contents(JSON.stringify(saved), null, false,
+                    Gio.FileCreateFlags.REPLACE_DESTINATION, null);
+            } catch(e) { logError(e, '[workspace-restore] focusedId update failed'); }
+        }
+
         if (this.#restoreTimerId !== null) {
             GLib.source_remove(this.#restoreTimerId);
             this.#restoreTimerId = null;
