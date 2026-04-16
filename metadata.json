@@ -1,6 +1,6 @@
 {
   "name": "Workspace Restore on Unlock",
   "description": "Saves and restores active workspace on screen lock/unlock",
-  "uuid": "genome-workspace-restore-extension@nahuel-nicolas.github.com",
+  "uuid": "gnome-workspace-restore-extension@nahuel-nicolas.github.com",
   "shell-version": ["46", "47", "48"]
 }
