@@ -15,6 +15,8 @@ function isNormalWindow(win) {
 
 function captureState() {
     const windows = [];
+    // list_all_windows() returns windows top-to-bottom (focused first).
+    // Saving in this order lets restore process them in reverse to rebuild z-order.
     for (const win of global.display.list_all_windows()) {
         if (!isNormalWindow(win)) continue;
         const rect = win.get_frame_rect();
@@ -59,8 +61,6 @@ function loadState() {
 export default class WorkspaceRestoreExtension {
     #restoreTimerId = null;
     #saveTimerId = null;
-    #focusSignalId = null;
-    #lastFocusedId = null;
 
     async enable() {
         const state = loadState();
@@ -69,16 +69,6 @@ export default class WorkspaceRestoreExtension {
         this.#saveTimerId = GLib.timeout_add_seconds(GLib.PRIORITY_LOW, 10, () => {
             saveState();
             return GLib.SOURCE_CONTINUE;
-        });
-
-        // Track focus in real-time so disable() always writes the current focused window,
-        // even if it changed within the 10s periodic save window before locking
-        const fw = global.display.focus_window;
-        if (fw && isNormalWindow(fw)) this.#lastFocusedId = fw.get_id();
-        this.#focusSignalId = global.display.connect('notify::focus-window', () => {
-            const fw = global.display.focus_window;
-            // Only track normal windows — ignore null/lock-screen focus shifts on lock
-            if (fw && isNormalWindow(fw)) this.#lastFocusedId = fw.get_id();
         });
 
         if (!state) return;
@@ -107,11 +97,11 @@ export default class WorkspaceRestoreExtension {
                 if (isNormalWindow(win)) winMap.set(win.get_id(), win);
             }
 
-            // Process focused window last so tile()'s raise_and_make_recent leaves it on top
-            const sorted = [...state.windows].sort((a, b) =>
-                (a.id === state.focusedId ? 1 : 0) - (b.id === state.focusedId ? 1 : 0));
+            // state.windows is top-to-bottom (focused first). Process in reverse so
+            // the focused window is raised last and ends up on top.
+            const ordered = [...state.windows].reverse();
 
-            for (const saved of sorted) {
+            for (const saved of ordered) {
                 const win = winMap.get(saved.id);
                 if (!win) continue;
 
@@ -120,16 +110,25 @@ export default class WorkspaceRestoreExtension {
                 if (saved.maximized) {
                     win.maximize(saved.maximized);
                 } else if (saved.isTiled && twm && Rect && saved.tiledRect) {
-                    // tile() preserves tiledRect at the intended size even when the
-                    // window snaps to character-cell boundaries (e.g. terminal emulators)
-                    twm.tile(win, new Rect(saved.tiledRect), { openTilingPopup: false, skipAnim: true });
-                    // tile() clears untiledRect; restore the saved value
+                    // Non-focused tiled windows: fakeTile=true positions without connecting
+                    // tile-group raise signals, avoiding z-order cascade. The focused tiled
+                    // window (processed last) gets a full tile() which builds the group and
+                    // raises it on top cleanly.
+                    const isFocused = saved.id === state.focusedId;
+                    twm.tile(win, new Rect(saved.tiledRect), { openTilingPopup: false, skipAnim: true, fakeTile: !isFocused });
                     win.untiledRect = saved.untiledRect ? new Meta.Rectangle(saved.untiledRect) : null;
                 } else {
                     win.move_resize_frame(true, saved.x, saved.y, saved.width, saved.height);
                     win.isTiled = saved.isTiled;
                     win.tiledRect = saved.tiledRect ? new Meta.Rectangle(saved.tiledRect) : null;
                     win.untiledRect = saved.untiledRect ? new Meta.Rectangle(saved.untiledRect) : null;
+                    // Raise non-tiled windows explicitly; tile() handles raise internally
+                    if (!saved.minimized) {
+                        if (win.raise_and_make_recent_on_workspace)
+                            win.raise_and_make_recent_on_workspace(global.workspace_manager.get_active_workspace());
+                        else
+                            win.raise_and_make_recent();
+                    }
                 }
 
                 // tile() calls unminimize() internally; re-minimize if needed
@@ -137,34 +136,12 @@ export default class WorkspaceRestoreExtension {
                 else if (!saved.minimized && win.minimized) win.unminimize();
             }
 
-            const focusedWin = state.focusedId ? winMap.get(state.focusedId) : null;
-            if (focusedWin && !focusedWin.minimized)
-                focusedWin.focus(global.get_current_time());
-
             this.#restoreTimerId = null;
             return GLib.SOURCE_REMOVE;
         });
     }
 
     disable() {
-        if (this.#focusSignalId !== null) {
-            global.display.disconnect(this.#focusSignalId);
-            this.#focusSignalId = null;
-        }
-
-        // Update focusedId with the real-time tracked value without touching geometry,
-        // which GNOME may have already altered by the time disable() fires
-        if (this.#lastFocusedId !== null) {
-            try {
-                const file = Gio.File.new_for_path(STATE_FILE);
-                const [, contents] = file.load_contents(null);
-                const saved = JSON.parse(new TextDecoder().decode(contents));
-                saved.focusedId = this.#lastFocusedId;
-                file.replace_contents(JSON.stringify(saved), null, false,
-                    Gio.FileCreateFlags.REPLACE_DESTINATION, null);
-            } catch(e) { logError(e, '[workspace-restore] focusedId update failed'); }
-        }
-
         if (this.#restoreTimerId !== null) {
             GLib.source_remove(this.#restoreTimerId);
             this.#restoreTimerId = null;
