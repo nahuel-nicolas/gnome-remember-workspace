@@ -95,7 +95,11 @@ export default class WorkspaceRestoreExtension {
                 if (isNormalWindow(win)) winMap.set(win.get_id(), win);
             }
 
-            for (const saved of state.windows) {
+            // Process focused window last so tile()'s raise_and_make_recent leaves it on top
+            const sorted = [...state.windows].sort((a, b) =>
+                (a.id === state.focusedId ? 1 : 0) - (b.id === state.focusedId ? 1 : 0));
+
+            for (const saved of sorted) {
                 const win = winMap.get(saved.id);
                 if (!win) continue;
 
