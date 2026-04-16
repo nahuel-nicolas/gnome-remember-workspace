@@ -34,6 +34,7 @@ function captureState() {
     }
     return {
         activeWs: global.workspace_manager.get_active_workspace_index(),
+        focusedId: global.display.focus_window?.get_id() ?? null,
         windows,
     };
 }
@@ -119,6 +120,11 @@ export default class WorkspaceRestoreExtension {
                 if (saved.minimized && !win.minimized) win.minimize();
                 else if (!saved.minimized && win.minimized) win.unminimize();
             }
+
+            // Restore focus to the window that was on top before locking
+            const focusedWin = state.focusedId ? winMap.get(state.focusedId) : null;
+            if (focusedWin && !focusedWin.minimized)
+                focusedWin.focus(global.get_current_time());
 
             this.#restoreTimerId = null;
             return GLib.SOURCE_REMOVE;
